@@ -488,6 +488,24 @@ async def test_attachment_permission(
             {
                 **ANSWERS,
                 "location": ai_task.ChoiceAnswer(
+                    choice="other", probabilities={"door": 0.9, "other": 0.1}
+                ),
+            },
+            id="nonmaximal-choice",
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "attention": ai_task.ScoreAnswer(
+                    score=1, probabilities=[0.9, 0.05, 0.05]
+                ),
+            },
+            id="inconsistent-score",
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "location": ai_task.ChoiceAnswer(
                     choice="door", probabilities={"door": 1}
                 ),
             },
@@ -575,3 +593,47 @@ async def test_invalid_provider_answers(
             blocking=True,
             return_response=True,
         )
+
+
+@pytest.mark.usefixtures("init_components")
+@pytest.mark.parametrize(
+    ("question_id", "answer"),
+    [
+        pytest.param(
+            "location",
+            ai_task.ChoiceAnswer(
+                choice="door", probabilities={"door": 0.5, "other": 0.5}
+            ),
+            id="first-tied-choice",
+        ),
+        pytest.param(
+            "location",
+            ai_task.ChoiceAnswer(
+                choice="other", probabilities={"door": 0.5, "other": 0.5}
+            ),
+            id="second-tied-choice",
+        ),
+        pytest.param(
+            "attention",
+            ai_task.ScoreAnswer(score=0.1500001, probabilities=[0.9, 0.05, 0.05]),
+            id="rounded-score",
+        ),
+    ],
+)
+async def test_consistent_provider_answers(
+    hass: HomeAssistant,
+    mock_evaluate: AsyncMock,
+    question_id: str,
+    answer: ai_task.EvaluationAnswer,
+) -> None:
+    """Accept ties and numerical rounding without rewriting the provider's result."""
+    answers = {**ANSWERS, question_id: answer}
+    mock_evaluate.return_value = ai_task.EvaluationTaskResult(answers=answers)
+    result = await ai_task.async_evaluate(
+        hass,
+        task_name="Delivery",
+        entity_id=TEST_ENTITY_ID,
+        state="Delivered",
+        questions=QUESTIONS,
+    )
+    assert result.answers == answers

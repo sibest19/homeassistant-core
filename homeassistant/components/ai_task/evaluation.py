@@ -171,6 +171,14 @@ def validate_result(
                 and all(_is_probability(value) for value in probabilities)
                 and isclose(sum(probabilities), 1, abs_tol=1e-6)
             )
+        if valid and isinstance(answer, ChoiceAnswer):
+            valid = answer.probabilities[answer.choice] == max(probabilities)
+        elif valid and isinstance(answer, ScoreAnswer):
+            valid = isclose(
+                answer.score,
+                sum(index * value for index, value in enumerate(probabilities)),
+                abs_tol=1e-6,
+            )
         if not valid:
             raise HomeAssistantError(
                 f"Evaluation returned an invalid answer for question {question_id}"

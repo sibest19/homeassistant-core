@@ -2,6 +2,7 @@
 
 from collections.abc import Generator
 from datetime import timedelta
+from math import inf, nan
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -450,3 +451,127 @@ async def test_attachment_permission(
         )
     resolve.assert_not_called()
     mock_evaluate.assert_not_called()
+
+
+@pytest.mark.usefixtures("init_components")
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param({}, id="missing-questions"),
+        pytest.param(
+            {**ANSWERS, "extra": ai_task.NoulAnswer(noul=0.5)}, id="extra-question"
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "delivered": ai_task.ScoreAnswer(score=0, probabilities=[1, 0]),
+            },
+            id="wrong-answer-type",
+        ),
+        *[
+            pytest.param(
+                {**ANSWERS, "delivered": ai_task.NoulAnswer(noul=value)},
+                id=f"invalid-noul-{value}",
+            )
+            for value in (True, "yes", -0.1, 1.1, nan, inf)
+        ],
+        pytest.param(
+            {
+                **ANSWERS,
+                "location": ai_task.ChoiceAnswer(
+                    choice="unknown", probabilities={"door": 0.9, "other": 0.1}
+                ),
+            },
+            id="unknown-choice",
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "location": ai_task.ChoiceAnswer(
+                    choice="door", probabilities={"door": 1}
+                ),
+            },
+            id="missing-option",
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "location": ai_task.ChoiceAnswer(
+                    choice="door", probabilities={"door": 0.9, "other": 0.1, "extra": 0}
+                ),
+            },
+            id="extra-option",
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "location": ai_task.ChoiceAnswer(
+                    choice="door", probabilities={"door": 0.2, "other": 0.1}
+                ),
+            },
+            id="unnormalized-choice",
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "location": ai_task.ChoiceAnswer(
+                    choice="door", probabilities={"door": 2, "other": -1}
+                ),
+            },
+            id="out-of-range-choice",
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "attention": ai_task.ScoreAnswer(score=1, probabilities=[0.5, 0.5]),
+            },
+            id="wrong-level-count",
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "attention": ai_task.ScoreAnswer(score=1, probabilities=[0, 0, 0]),
+            },
+            id="zero-distribution",
+        ),
+        pytest.param(
+            {
+                **ANSWERS,
+                "attention": ai_task.ScoreAnswer(score=1, probabilities=[True, 0, 0]),
+            },
+            id="boolean-probability",
+        ),
+        *[
+            pytest.param(
+                {
+                    **ANSWERS,
+                    "attention": ai_task.ScoreAnswer(
+                        score=value, probabilities=[0, 1, 0]
+                    ),
+                },
+                id=f"invalid-score-{value}",
+            )
+            for value in (True, "high", -1, 3, nan, inf)
+        ],
+    ],
+)
+async def test_invalid_provider_answers(
+    hass: HomeAssistant,
+    mock_evaluate: AsyncMock,
+    answers: dict[str, ai_task.EvaluationAnswer],
+) -> None:
+    """Reject invalid integration results through the public service contract."""
+    mock_evaluate.return_value = ai_task.EvaluationTaskResult(answers=answers)
+    with pytest.raises(HomeAssistantError, match="Evaluation returned"):
+        await hass.services.async_call(
+            "ai_task",
+            "evaluate",
+            {
+                "task_name": "Delivery",
+                "entity_id": TEST_ENTITY_ID,
+                "state": "Delivered",
+                "questions": QUESTIONS,
+            },
+            blocking=True,
+            return_response=True,
+        )

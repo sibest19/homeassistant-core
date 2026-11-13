@@ -33,6 +33,7 @@ from .evaluation import (
     EvaluationQuestion,
     EvaluationTask,
     EvaluationTaskResult,
+    validate_result,
 )
 from .permissions import async_check_permissions
 
@@ -386,7 +387,7 @@ async def async_evaluate(
         )
     with async_get_chat_session(hass) as session:
         resolved_attachments = await _resolve_attachments(hass, session, attachments)
-        return await entity.internal_async_evaluate(
+        result = await entity.internal_async_evaluate(
             EvaluationTask(
                 name=task_name,
                 questions=questions,
@@ -395,3 +396,5 @@ async def async_evaluate(
             ),
             context,
         )
+    validate_result(questions, result)
+    return result

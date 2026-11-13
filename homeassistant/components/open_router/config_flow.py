@@ -3,6 +3,7 @@
 import logging
 from typing import Any, override
 
+from openai import OpenAIError
 import probatio
 from python_open_router import (
     Model,
@@ -33,6 +34,7 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_INPUT_MODALITIES,
     CONF_OUTPUT_MODALITIES,
     CONF_PROMPT,
     CONF_WEB_SEARCH,
@@ -59,7 +61,7 @@ class OpenRouterConfigFlow(ConfigFlow, domain=DOMAIN):
         return {
             "conversation": ConversationFlowHandler,
             "ai_task_data": AITaskDataFlowHandler,
-            "ai_task_evaluate": AITaskDataFlowHandler,
+            "ai_task_evaluate": EvaluationFlowHandler,
         }
 
     @override
@@ -314,6 +316,73 @@ class AITaskDataFlowHandler(OpenRouterSubentryFlowHandler):
                         SelectSelectorConfig(
                             options=options, mode=SelectSelectorMode.DROPDOWN, sort=True
                         ),
+                    ),
+                }
+            ),
+        )
+
+
+class EvaluationFlowHandler(AITaskDataFlowHandler):
+    """Handle configuration of a Decisions model."""
+
+    def __init__(self) -> None:
+        """Initialize the evaluation flow."""
+        super().__init__()
+        self._decision_models: dict[str, Any] = {}
+
+    @override
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Manage evaluation task configuration."""
+        entry = self._get_entry()
+        if entry.state is not ConfigEntryState.LOADED:
+            return self.async_abort(reason="entry_not_loaded")
+
+        if user_input is not None:
+            model = self._decision_models[user_input[CONF_MODEL]]
+            data = {
+                **user_input,
+                CONF_INPUT_MODALITIES: model["architecture"]["input_modalities"],
+            }
+            if self._is_new:
+                return self.async_create_entry(title=model["name"], data=data)
+            return self.async_update_and_abort(
+                entry, self._get_reconfigure_subentry(), data=data
+            )
+
+        try:
+            response = await entry.runtime_data.get(
+                "/models",
+                cast_to=dict[str, Any],
+                options={"params": {"output_modalities": "decisions"}},
+            )
+            self._decision_models = {
+                model["id"]: model
+                for model in response["data"]
+                if "decisions" in model["architecture"]["output_modalities"]
+            }
+        except OpenAIError:
+            return self.async_abort(reason="cannot_connect")
+        except Exception:
+            _LOGGER.exception("Unexpected exception")
+            return self.async_abort(reason="unknown")
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=probatio.Schema(
+                {
+                    probatio.Required(
+                        CONF_MODEL, default=self.options.get(CONF_MODEL)
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=model["id"], label=model["name"])
+                                for model in self._decision_models.values()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                            sort=True,
+                        )
                     ),
                 }
             ),

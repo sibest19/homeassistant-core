@@ -1,25 +1,24 @@
 """Test AI Task evaluation for OpenRouter."""
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import openai
-from openai.types.chat import ChatCompletion, ChatCompletionMessage
-from openai.types.chat.chat_completion import Choice
 import pytest
+import respx
 from syrupy.assertion import SnapshotAssertion
 
 from homeassistant.components import ai_task, media_source
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.json import json_dumps
 
 from . import setup_integration
 
 from tests.common import MockConfigEntry
 
 ENTITY_ID = "ai_task.gpt_4"
-
 QUESTIONS: dict[str, ai_task.EvaluationQuestion] = {
     "delivered": {"type": "noul", "instructions": "Has the package arrived?"},
     "location": {
@@ -33,23 +32,21 @@ QUESTIONS: dict[str, ai_task.EvaluationQuestion] = {
         "criteria": ["Not urgent", "Somewhat urgent", "Very urgent"],
     },
 }
-
-
-def _completion(content: str | None) -> ChatCompletion:
-    """Build a chat completion with the given content."""
-    return ChatCompletion(
-        id="chatcmpl-1234567890ABCDEFGHIJKLMNOPQRS",
-        choices=[
-            Choice(
-                finish_reason="stop",
-                index=0,
-                message=ChatCompletionMessage(content=content, role="assistant"),
-            )
-        ],
-        created=1700000000,
-        model="openai/gpt-4",
-        object="chat.completion",
-    )
+ANSWERS: dict[str, Any] = {
+    "delivered": {"type": "noul", "noul": 0.9},
+    "location": {
+        "type": "choice",
+        "choice": "door",
+        "probabilities": {"door": 0.75, "garage": 0.25},
+        "confidence": 0.8,
+    },
+    "urgency": {
+        "type": "score",
+        "score": 1.0,
+        "probabilities": {"2": 0.25, "0": 0.25, "1": 0.5},
+        "legend": {"0": "Not urgent", "1": "Somewhat urgent", "2": "Very urgent"},
+    },
+}
 
 
 async def test_evaluate(
@@ -58,21 +55,9 @@ async def test_evaluate(
     mock_openai_client: AsyncMock,
     snapshot: SnapshotAssertion,
 ) -> None:
-    """Test evaluating questions."""
+    """Send typed questions and preserve the provider's answers."""
     await setup_integration(hass, mock_config_entry)
-
-    mock_openai_client.chat.completions.create = AsyncMock(
-        return_value=_completion(
-            json_dumps(
-                {
-                    "delivered": 0.9,
-                    "location": {"door": 0.375, "garage": 0.125},
-                    "urgency": {"0": 0.25, "1": 0.5, "2": 0.25},
-                }
-            )
-        )
-    )
-
+    mock_openai_client.post.return_value = {"answers": ANSWERS}
     result = await ai_task.async_evaluate(
         hass,
         task_name="Check delivery",
@@ -80,170 +65,203 @@ async def test_evaluate(
         questions=QUESTIONS,
         state={"message": "Your package was left at the front door."},
     )
-
-    assert result.as_dict() == {
-        "answers": {
-            "delivered": {"type": "noul", "noul": 0.9},
-            "location": {
-                "type": "choice",
-                "choice": "door",
-                "probabilities": {"door": 0.75, "garage": 0.25},
-            },
-            "urgency": {
-                "type": "score",
-                "score": 1.0,
-                "probabilities": [0.25, 0.5, 0.25],
-            },
-        }
+    assert result.answers == {
+        "delivered": ai_task.NoulAnswer(noul=0.9),
+        "location": ai_task.ChoiceAnswer(
+            choice="door", probabilities={"door": 0.75, "garage": 0.25}
+        ),
+        "urgency": ai_task.ScoreAnswer(score=1, probabilities=[0.25, 0.5, 0.25]),
     }
-    assert mock_openai_client.chat.completions.create.call_args.kwargs == snapshot
+    assert mock_openai_client.post.call_args.args == (
+        "https://openrouter.ai/api/alpha/decisions",
+    )
+    assert mock_openai_client.post.call_args.kwargs["body"] == snapshot
+    mock_openai_client.chat.completions.create.assert_not_called()
 
 
-async def test_evaluate_with_attachments(
+@pytest.mark.parametrize(
+    "state", ["Delivered", {"count": 1}, ["Delivered", True], 0, False]
+)
+@respx.mock
+async def test_decisions_endpoint(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     mock_openai_client: AsyncMock,
+    state: Any,
 ) -> None:
-    """Test evaluating questions with an image attachment and no state."""
+    """The existing OpenAI client sends authenticated requests to the alpha endpoint."""
     await setup_integration(hass, mock_config_entry)
-
-    mock_openai_client.chat.completions.create = AsyncMock(
-        return_value=_completion(json_dumps({"delivered": 1}))
+    route = respx.post("https://openrouter.ai/api/alpha/decisions").mock(
+        return_value=httpx.Response(200, json={"answers": ANSWERS})
     )
-
-    with (
-        patch(
-            "homeassistant.components.media_source.async_resolve_media",
-            return_value=media_source.PlayMedia(
-                url="http://example.com/doorbell_snapshot.jpg",
-                mime_type="image/jpeg",
-                path=Path("doorbell_snapshot.jpg"),
-            ),
-        ),
-        patch("pathlib.Path.exists", return_value=True),
-        patch.object(hass.config, "is_allowed_path", return_value=True),
-        patch("pathlib.Path.read_bytes", return_value=b"fake_image_data"),
-    ):
+    async with openai.AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1", api_key="test-key"
+    ) as client:
+        mock_config_entry.runtime_data = client
         result = await ai_task.async_evaluate(
             hass,
             task_name="Check delivery",
             entity_id=ENTITY_ID,
-            questions={"delivered": QUESTIONS["delivered"]},
-            attachments=[
-                {
-                    "media_content_id": "media-source://media/doorbell_snapshot.jpg",
-                    "media_content_type": "image/jpeg",
-                }
-            ],
+            questions=QUESTIONS,
+            state=state,
         )
-
-    assert result.answers == {"delivered": ai_task.NoulAnswer(noul=1.0)}
-    content = mock_openai_client.chat.completions.create.call_args.kwargs["messages"][
-        1
-    ]["content"]
-    assert content == [
-        {
-            "type": "text",
-            "text": "Question delivered: Has the package arrived?\n"
-            "Answer with the probability that the answer is yes.",
-        },
-        {
-            "type": "image_url",
-            "image_url": {"url": "data:image/jpeg;base64,ZmFrZV9pbWFnZV9kYXRh"},
-        },
-    ]
+    assert result.answers["delivered"] == ai_task.NoulAnswer(noul=0.9)
+    assert route.calls[0].request.headers["Authorization"] == "Bearer test-key"
+    assert route.calls[0].request.headers["X-Title"] == "Home Assistant"
 
 
 @pytest.mark.parametrize(
-    ("content", "message"),
+    ("mime_type", "evaluation_input_modalities", "expected_part"),
     [
-        pytest.param(None, "OpenRouter returned an empty evaluation", id="empty"),
-        pytest.param(
-            "not json", "Error with OpenRouter structured response", id="invalid_json"
+        (
+            "image/jpeg",
+            ["text", "image"],
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/jpeg;base64,ZmFrZV9kYXRh"},
+            },
         ),
-        pytest.param(
-            json_dumps({"delivered": 0.5}),
-            "OpenRouter returned unexpected questions",
-            id="missing_question",
+        (
+            "application/pdf",
+            ["text", "file"],
+            {
+                "type": "file",
+                "file": {
+                    "filename": "attachment.pdf",
+                    "file_data": "data:application/pdf;base64,ZmFrZV9kYXRh",
+                },
+            },
         ),
-        pytest.param(
-            json_dumps(
-                {
-                    "delivered": 1.5,
-                    "location": {"door": 0.5, "garage": 0.5},
-                    "urgency": {"0": 1, "1": 0, "2": 0},
-                }
+    ],
+)
+@pytest.mark.parametrize("state", [None, {"message": "Delivered"}])
+async def test_evaluate_with_attachments(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_openai_client: AsyncMock,
+    mime_type: str,
+    evaluation_input_modalities: list[str],
+    expected_part: dict[str, Any],
+    state: Any,
+) -> None:
+    """Send images and PDFs as top-level state parts with optional shared state."""
+    await setup_integration(hass, mock_config_entry)
+    mock_openai_client.post.return_value = {
+        "answers": {"delivered": ANSWERS["delivered"]}
+    }
+    with (
+        patch(
+            "homeassistant.components.media_source.async_resolve_media",
+            return_value=media_source.PlayMedia(
+                url="http://example.com/attachment",
+                mime_type=mime_type,
+                path=Path("attachment.pdf"),
             ),
-            "OpenRouter returned an invalid probability for question delivered",
-            id="noul_out_of_range",
         ),
-        pytest.param(
-            json_dumps(
+        patch("pathlib.Path.exists", return_value=True),
+        patch.object(hass.config, "is_allowed_path", return_value=True),
+        patch("pathlib.Path.read_bytes", return_value=b"fake_data"),
+    ):
+        await ai_task.async_evaluate(
+            hass,
+            task_name="Delivery",
+            entity_id=ENTITY_ID,
+            questions={"delivered": QUESTIONS["delivered"]},
+            state=state,
+            attachments=[
                 {
-                    "delivered": True,
-                    "location": {"door": 0.5, "garage": 0.5},
-                    "urgency": {"0": 1, "1": 0, "2": 0},
+                    "media_content_id": "media-source://media/attachment",
+                    "media_content_type": mime_type,
                 }
+            ],
+        )
+    assert mock_openai_client.post.call_args.kwargs["body"]["state"] == (
+        [] if state is None else [state]
+    ) + [expected_part]
+
+
+@pytest.mark.parametrize(
+    ("evaluation_input_modalities", "mime_type", "error"),
+    [
+        (["text"], "image/jpeg", "does not support attachments"),
+        ([], "image/jpeg", "does not support attachments"),
+        (["text", "image"], "application/pdf", "does not support this attachment type"),
+        (["text", "file"], "image/jpeg", "does not support this attachment type"),
+    ],
+)
+async def test_unsupported_attachments(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_openai_client: AsyncMock,
+    evaluation_input_modalities: list[str],
+    mime_type: str,
+    error: str,
+) -> None:
+    """Reject unsupported attachment modalities before contacting the provider."""
+    await setup_integration(hass, mock_config_entry)
+    with (
+        patch(
+            "homeassistant.components.media_source.async_resolve_media",
+            return_value=media_source.PlayMedia(
+                url="http://example.com/file",
+                mime_type=mime_type,
+                path=Path("attachment"),
             ),
-            "OpenRouter returned an invalid probability for question delivered",
-            id="noul_bool",
         ),
-        pytest.param(
-            json_dumps(
+        patch("pathlib.Path.exists", return_value=True),
+        patch.object(hass.config, "is_allowed_path", return_value=True),
+        patch("pathlib.Path.read_bytes", return_value=b"fake_data"),
+        pytest.raises(HomeAssistantError, match=error),
+    ):
+        await ai_task.async_evaluate(
+            hass,
+            task_name="Delivery",
+            entity_id=ENTITY_ID,
+            questions=QUESTIONS,
+            attachments=[
                 {
-                    "delivered": 0.5,
-                    "location": {"door": 0.5},
-                    "urgency": {"0": 1, "1": 0, "2": 0},
+                    "media_content_id": "media-source://media/attachment",
+                    "media_content_type": mime_type,
                 }
-            ),
-            "OpenRouter returned invalid probabilities for question location",
-            id="choice_missing_option",
-        ),
-        pytest.param(
-            json_dumps(
-                {
-                    "delivered": 0.5,
-                    "location": {"door": "high", "garage": 0.5},
-                    "urgency": {"0": 1, "1": 0, "2": 0},
-                }
-            ),
-            "OpenRouter returned invalid probabilities for question location",
-            id="choice_not_number",
-        ),
-        pytest.param(
-            json_dumps(
-                {
-                    "delivered": 0.5,
-                    "location": {"door": 0.5, "garage": 0.5},
-                    "urgency": {"0": 0, "1": 0, "2": 0},
-                }
-            ),
-            "OpenRouter returned invalid probabilities for question urgency",
-            id="score_all_zero",
-        ),
+            ],
+        )
+    mock_openai_client.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        {},
+        {"answers": None},
+        {"answers": []},
+        {"answers": {"delivered": {"type": "unknown"}}},
+        {"answers": {"delivered": {"type": "noul"}}},
+        {
+            "answers": {
+                "urgency": {"type": "score", "score": 1, "probabilities": {"1": 1}}
+            }
+        },
     ],
 )
 async def test_evaluate_invalid_response(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     mock_openai_client: AsyncMock,
-    content: str | None,
-    message: str,
+    response: Any,
 ) -> None:
-    """Test invalid evaluation responses raise an error."""
+    """Reject malformed native Decisions responses."""
     await setup_integration(hass, mock_config_entry)
-
-    mock_openai_client.chat.completions.create = AsyncMock(
-        return_value=_completion(content)
-    )
-
-    with pytest.raises(HomeAssistantError, match=message):
+    mock_openai_client.post.return_value = response
+    with pytest.raises(
+        HomeAssistantError, match="OpenRouter returned an invalid evaluation"
+    ):
         await ai_task.async_evaluate(
             hass,
-            task_name="Check delivery",
+            task_name="Delivery",
             entity_id=ENTITY_ID,
             questions=QUESTIONS,
-            state="Your package was left at the front door.",
+            state="Delivered",
         )
 
 
@@ -252,20 +270,16 @@ async def test_evaluate_api_error(
     mock_config_entry: MockConfigEntry,
     mock_openai_client: AsyncMock,
 ) -> None:
-    """Test API errors raise an error."""
+    """Report API errors through Home Assistant."""
     await setup_integration(hass, mock_config_entry)
-
-    mock_openai_client.chat.completions.create = AsyncMock(
-        side_effect=openai.OpenAIError("boom")
-    )
-
+    mock_openai_client.post.side_effect = openai.OpenAIError("boom")
     with pytest.raises(
         HomeAssistantError, match="Error evaluating OpenRouter task: boom"
     ):
         await ai_task.async_evaluate(
             hass,
-            task_name="Check delivery",
+            task_name="Delivery",
             entity_id=ENTITY_ID,
             questions=QUESTIONS,
-            state="Your package was left at the front door.",
+            state="Delivered",
         )

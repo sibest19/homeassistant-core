@@ -1,11 +1,13 @@
 """Types and validation for decision tasks."""
 
 from dataclasses import asdict, dataclass, field
+from math import isclose
 from typing import Any, Literal, TypedDict
 
 import probatio
 
 from homeassistant.components.conversation import Attachment
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util.json import JsonValueType
 
 
@@ -115,3 +117,61 @@ class EvaluationTaskResult:
     def as_dict(self) -> dict[str, Any]:
         """Return the action response."""
         return asdict(self)
+
+
+def _is_probability(value: Any) -> bool:
+    """Return whether a value is a finite probability."""
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and 0 <= value <= 1
+    )
+
+
+def validate_result(
+    questions: dict[str, EvaluationQuestion], result: EvaluationTaskResult
+) -> None:
+    """Enforce the evaluation result contract at the integration boundary."""
+    if (
+        not isinstance(result, EvaluationTaskResult)
+        or not isinstance(result.answers, dict)
+        or result.answers.keys() != questions.keys()
+    ):
+        raise HomeAssistantError("Evaluation returned unexpected questions")
+
+    for question_id, question in questions.items():
+        answer = result.answers[question_id]
+        valid = False
+        probabilities: list[float] = []
+        if question["type"] == "noul" and isinstance(answer, NoulAnswer):
+            valid = _is_probability(answer.noul)
+        elif question["type"] == "choice" and isinstance(answer, ChoiceAnswer):
+            if (
+                isinstance(answer.probabilities, dict)
+                and answer.probabilities.keys() == question["criteria"].keys()
+                and isinstance(answer.choice, str)
+                and answer.choice in question["criteria"]
+            ):
+                probabilities = list(answer.probabilities.values())
+                valid = True
+        elif question["type"] == "score" and isinstance(answer, ScoreAnswer):
+            if (
+                isinstance(answer.probabilities, list)
+                and len(answer.probabilities) == len(question["criteria"])
+                and not isinstance(answer.score, bool)
+                and isinstance(answer.score, (int, float))
+                and 0 <= answer.score <= len(question["criteria"]) - 1
+            ):
+                probabilities = answer.probabilities
+                valid = True
+
+        if probabilities:
+            valid = (
+                valid
+                and all(_is_probability(value) for value in probabilities)
+                and isclose(sum(probabilities), 1, abs_tol=1e-6)
+            )
+        if not valid:
+            raise HomeAssistantError(
+                f"Evaluation returned an invalid answer for question {question_id}"
+            )

@@ -366,8 +366,11 @@ async def test_generate_data_with_attachments(
             "image_url": {"url": "data:image/jpeg;base64,ZmFrZV9pbWFnZV9kYXRh"},
         },
         {
-            "type": "image_url",
-            "image_url": {"url": "data:application/pdf;base64,ZmFrZV9pbWFnZV9kYXRh"},
+            "type": "file",
+            "file": {
+                "filename": "context.pdf",
+                "file_data": "data:application/pdf;base64,ZmFrZV9pbWFnZV9kYXRh",
+            },
         },
     ]
 

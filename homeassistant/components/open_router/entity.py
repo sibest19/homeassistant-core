@@ -11,7 +11,7 @@ import openai
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionChunk,
-    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartParam,
     ChatCompletionFunctionToolParam,
     ChatCompletionMessageFunctionToolCallParam,
     ChatCompletionMessageParam,
@@ -216,14 +216,14 @@ async def _transform_stream(
 
 async def async_prepare_files_for_prompt(
     hass: HomeAssistant, files: list[tuple[Path, str | None]]
-) -> list[ChatCompletionContentPartImageParam]:
+) -> list[ChatCompletionContentPartParam]:
     """Append files to a prompt.
 
     Caller needs to ensure that the files are allowed.
     """
 
-    def append_files_to_content() -> list[ChatCompletionContentPartImageParam]:
-        content: list[ChatCompletionContentPartImageParam] = []
+    def append_files_to_content() -> list[ChatCompletionContentPartParam]:
+        content: list[ChatCompletionContentPartParam] = []
 
         for file_path, mime_type in files:
             if not file_path.exists():
@@ -232,19 +232,32 @@ async def async_prepare_files_for_prompt(
             if mime_type is None:
                 mime_type = guess_file_type(file_path)[0]
 
-            if not mime_type or not mime_type.startswith(("image/", "application/pdf")):
+            if not mime_type or not (
+                mime_type.startswith("image/") or mime_type == "application/pdf"
+            ):
                 raise HomeAssistantError(
                     "Only images and PDF are supported by the OpenRouter API, "
                     f"`{file_path}` is not an image file or PDF"
                 )
 
             base64_file = base64.b64encode(file_path.read_bytes()).decode("utf-8")
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{base64_file}"},
-                }
-            )
+            if mime_type == "application/pdf":
+                content.append(
+                    {
+                        "type": "file",
+                        "file": {
+                            "filename": file_path.name,
+                            "file_data": f"data:{mime_type};base64,{base64_file}",
+                        },
+                    }
+                )
+            else:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{base64_file}"},
+                    }
+                )
 
         return content
 

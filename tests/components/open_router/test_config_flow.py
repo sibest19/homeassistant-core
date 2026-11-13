@@ -1,12 +1,15 @@
 """Test the OpenRouter config flow."""
 
+from typing import Any
 from unittest.mock import AsyncMock
 
+from openai import OpenAIError
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 from python_open_router import OpenRouterError
 
 from homeassistant.components.open_router.const import (
+    CONF_INPUT_MODALITIES,
     CONF_OUTPUT_MODALITIES,
     CONF_PROMPT,
     CONF_REASONING,
@@ -326,7 +329,6 @@ async def test_create_conversation_agent_reasoning_not_supported(
     assert result["data"][CONF_REASONING] == "auto"
 
 
-@pytest.mark.parametrize("subentry_type", ["ai_task_data", "ai_task_evaluate"])
 @pytest.mark.parametrize(
     ("model", "expected_modalities"),
     [
@@ -341,13 +343,12 @@ async def test_create_ai_task(
     mock_config_entry: MockConfigEntry,
     model: str,
     expected_modalities: list[str],
-    subentry_type: str,
 ) -> None:
     """Test creating an AI Task stores the model output modalities."""
     await setup_integration(hass, mock_config_entry)
 
     result = await hass.config_entries.subentries.async_init(
-        (mock_config_entry.entry_id, subentry_type),
+        (mock_config_entry.entry_id, "ai_task_data"),
         context={"source": SOURCE_USER},
     )
     assert result["type"] is FlowResultType.FORM
@@ -407,6 +408,11 @@ async def test_subentry_exceptions(
     await setup_integration(hass, mock_config_entry)
 
     mock_open_router_client.get_models.side_effect = exception
+    mock_openai_client.get.side_effect = (
+        OpenAIError("exception")
+        if isinstance(exception, OpenRouterError)
+        else exception
+    )
 
     result = await hass.config_entries.subentries.async_init(
         (mock_config_entry.entry_id, subentry_type),
@@ -493,18 +499,16 @@ async def test_reconfigure_conversation_agent_reasoning(
     assert subentry.data[CONF_REASONING] == "low"
 
 
-@pytest.mark.parametrize("subentry_type", ["ai_task_data", "ai_task_evaluate"])
 async def test_reconfigure_ai_task(
     hass: HomeAssistant,
     mock_open_router_client: AsyncMock,
     mock_openai_client: AsyncMock,
     mock_config_entry: MockConfigEntry,
-    subentry_type: str,
 ) -> None:
     """Test reconfiguring an AI task."""
     await setup_integration(hass, mock_config_entry)
 
-    subentry_id = get_subentry_id(mock_config_entry, subentry_type)
+    subentry_id = get_subentry_id(mock_config_entry, "ai_task_data")
 
     result = await mock_config_entry.start_subentry_reconfigure_flow(hass, subentry_id)
     assert result["type"] is FlowResultType.FORM
@@ -756,3 +760,51 @@ async def test_reconfigure_conversation_subentry_empty_llm_api(
     schema = result["data_schema"].schema
     key = next(k for k in schema if k == CONF_LLM_HASS_API)
     assert key.default() == []
+
+
+@pytest.mark.parametrize("reconfigure", [False, True])
+@pytest.mark.parametrize(
+    ("model", "modalities"),
+    [("typesafe/jev-1.13", ["text", "image"]), ("azure/text-decisions", ["text"])],
+)
+async def test_evaluation_flow(
+    hass: HomeAssistant,
+    mock_openai_client: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+    reconfigure: bool,
+    model: str,
+    modalities: list[str],
+) -> None:
+    """Only offer Decisions models and persist their attachment capabilities."""
+    await setup_integration(hass, mock_config_entry)
+    subentry_id = get_subentry_id(mock_config_entry, "ai_task_evaluate")
+    if reconfigure:
+        result = await mock_config_entry.start_subentry_reconfigure_flow(
+            hass, subentry_id
+        )
+    else:
+        result = await hass.config_entries.subentries.async_init(
+            (mock_config_entry.entry_id, "ai_task_evaluate"),
+            context={"source": SOURCE_USER},
+        )
+    assert result["type"] is FlowResultType.FORM
+    assert result["data_schema"].schema["model"].config["options"] == [
+        {"value": "typesafe/jev-1.13", "label": "Jev 1.13"},
+        {"value": "azure/text-decisions", "label": "Text Decisions"},
+        {"value": "google/gemini-decision-1", "label": "Gemini Decision 1"},
+    ]
+    mock_openai_client.get.assert_awaited_once_with(
+        "/models",
+        cast_to=dict[str, Any],
+        options={"params": {"output_modalities": "decisions"}},
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {CONF_MODEL: model}
+    )
+    expected_data = {CONF_MODEL: model, CONF_INPUT_MODALITIES: modalities}
+    if reconfigure:
+        assert result["reason"] == "reconfigure_successful"
+        assert mock_config_entry.subentries[subentry_id].data == expected_data
+    else:
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert result["data"] == expected_data

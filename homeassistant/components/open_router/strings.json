@@ -113,6 +113,9 @@
     "invalid_api_key": {
       "message": "Invalid API key"
     },
+    "invalid_evaluation": {
+      "message": "OpenRouter returned an invalid evaluation"
+    },
     "invalid_image_returned": {
       "message": "OpenRouter returned an invalid image"
     },
@@ -130,6 +133,9 @@
     },
     "tool_args_parse_error": {
       "message": "OpenRouter returned invalid tool arguments: {error}"
+    },
+    "unsupported_attachment_type": {
+      "message": "The selected model does not support this attachment type"
     },
     "unsupported_file_type": {
       "message": "Only images and PDF are supported by the OpenRouter API, `{file_path}` is not an image file or PDF"

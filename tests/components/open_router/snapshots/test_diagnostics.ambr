@@ -26,6 +26,17 @@
         'subentry_type': 'ai_task_data',
         'title': 'Gemini 2.5 Flash Image',
       }),
+      'ABCDEH': dict({
+        'data': dict({
+          'input_modalities': list([
+            'text',
+            'image',
+          ]),
+          'model': 'typesafe/jev-1.13',
+        }),
+        'subentry_type': 'ai_task_evaluate',
+        'title': 'GPT-4',
+      }),
     }),
   })
 # ---

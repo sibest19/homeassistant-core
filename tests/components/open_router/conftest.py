@@ -12,6 +12,7 @@ from pytest_homeassistant.common import MockConfigEntry, async_load_fixture
 from python_open_router import KeyData, ModelsDataWrapper
 
 from homeassistant.components.open_router.const import (
+    CONF_INPUT_MODALITIES,
     CONF_OUTPUT_MODALITIES,
     CONF_PROMPT,
     CONF_REASONING,
@@ -85,10 +86,17 @@ def ai_task_data_subentry_data(output_modalities: list[str]) -> dict[str, Any]:
 
 
 @pytest.fixture
+def evaluation_input_modalities() -> list[str]:
+    """Mock the evaluation model's input modalities."""
+    return ["text", "image"]
+
+
+@pytest.fixture
 def mock_config_entry(
     hass: HomeAssistant,
     conversation_subentry_data: dict[str, Any],
     ai_task_data_subentry_data: dict[str, Any],
+    evaluation_input_modalities: list[str],
 ) -> MockConfigEntry:
     """Mock a config entry."""
     return MockConfigEntry(
@@ -115,7 +123,10 @@ def mock_config_entry(
                 unique_id=None,
             ),
             ConfigSubentryData(
-                data={CONF_MODEL: "openai/gpt-4", CONF_OUTPUT_MODALITIES: ["text"]},
+                data={
+                    CONF_MODEL: "typesafe/jev-1.13",
+                    CONF_INPUT_MODALITIES: evaluation_input_modalities,
+                },
                 subentry_id="ABCDEH",
                 subentry_type="ai_task_evaluate",
                 title="GPT-4",
@@ -138,6 +149,45 @@ async def mock_openai_client() -> AsyncGenerator[AsyncMock]:
     """Initialize integration."""
     with patch("homeassistant.components.open_router.AsyncOpenAI") as mock_client:
         client = mock_client.return_value
+        client.get = AsyncMock(
+            return_value={
+                "data": [
+                    {
+                        "id": "typesafe/jev-1.13",
+                        "name": "Jev 1.13",
+                        "architecture": {
+                            "input_modalities": ["text", "image"],
+                            "output_modalities": ["decisions"],
+                        },
+                    },
+                    {
+                        "id": "azure/text-decisions",
+                        "name": "Text Decisions",
+                        "architecture": {
+                            "input_modalities": ["text"],
+                            "output_modalities": ["decisions"],
+                        },
+                    },
+                    {
+                        "id": "google/gemini-decision-1",
+                        "name": "Gemini Decision 1",
+                        "architecture": {
+                            "input_modalities": ["text", "image", "file"],
+                            "output_modalities": ["decisions"],
+                        },
+                    },
+                    {
+                        "id": "openai/gpt-4",
+                        "name": "GPT-4",
+                        "architecture": {
+                            "input_modalities": ["text"],
+                            "output_modalities": ["text"],
+                        },
+                    },
+                ]
+            }
+        )
+        client.post = AsyncMock()
         client.chat.completions.create = AsyncMock(
             return_value=get_generator_from_data(
                 [

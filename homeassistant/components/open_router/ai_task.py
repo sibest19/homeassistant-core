@@ -6,8 +6,6 @@ import logging
 from typing import Any, override
 
 import openai
-from openai.types.chat import ChatCompletionContentPartParam
-from openai.types.shared_params import ResponseFormatJSONSchema
 from python_open_router import Modality
 
 from homeassistant.components import ai_task, conversation
@@ -15,12 +13,10 @@ from homeassistant.config_entries import ConfigSubentry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.json import json_dumps
-from homeassistant.util import slugify
 from homeassistant.util.json import json_loads
 
 from . import OpenRouterConfigEntry
-from .const import CONF_OUTPUT_MODALITIES, DOMAIN
+from .const import CONF_INPUT_MODALITIES, CONF_OUTPUT_MODALITIES, DOMAIN
 from .entity import OpenRouterEntity, async_prepare_files_for_prompt
 
 _LOGGER = logging.getLogger(__name__)
@@ -143,183 +139,95 @@ class OpenRouterAITaskEntity(
         )
 
 
-EVALUATION_PROMPT = (
-    "You evaluate questions about the provided state and attachments. "
-    "For every question, estimate a calibrated probability for each possible "
-    "answer based only on the provided information. Probabilities are numbers "
-    "between 0 and 1."
-)
-
-
-def _format_question(question_id: str, question: ai_task.EvaluationQuestion) -> str:
-    """Describe a question and the expected answer format for the prompt."""
-    lines = [f"Question {question_id}: {question['instructions']}"]
-    if question["type"] == "noul":
-        lines.append("Answer with the probability that the answer is yes.")
-    elif question["type"] == "choice":
-        lines.append("Answer with the probability of each option:")
-        lines.extend(
-            f"- {option}: {description}"
-            for option, description in question["criteria"].items()
-        )
-    else:
-        lines.append("Answer with the probability of each level:")
-        lines.extend(
-            f"- {index}: {description}"
-            for index, description in enumerate(question["criteria"])
-        )
-    return "\n".join(lines)
-
-
-def _question_schema(question: ai_task.EvaluationQuestion) -> dict[str, Any]:
-    """Return the JSON schema for the answer to a question."""
-    if question["type"] == "noul":
-        return {"type": "number"}
-    keys = (
-        list(question["criteria"])
-        if question["type"] == "choice"
-        else [str(index) for index in range(len(question["criteria"]))]
-    )
-    return {
-        "type": "object",
-        "properties": {key: {"type": "number"} for key in keys},
-        "required": keys,
-        "additionalProperties": False,
-    }
-
-
-def _normalize(question_id: str, probabilities: list[Any]) -> list[float]:
-    """Validate and normalize a returned probability distribution."""
-    if any(
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not 0 <= value <= 1
-        for value in probabilities
-    ) or not (total := sum(probabilities)):
-        raise HomeAssistantError(
-            f"OpenRouter returned invalid probabilities for question {question_id}"
-        )
-    return [value / total for value in probabilities]
-
-
-def _parse_answer(
-    question_id: str, question: ai_task.EvaluationQuestion, value: Any
-) -> ai_task.EvaluationAnswer:
-    """Convert a structured response value into an evaluation answer."""
-    if question["type"] == "noul":
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not 0 <= value <= 1
-        ):
-            raise HomeAssistantError(
-                f"OpenRouter returned an invalid probability for question {question_id}"
-            )
-        return ai_task.NoulAnswer(noul=float(value))
-    if question["type"] == "choice":
-        options = list(question["criteria"])
-    else:
-        options = [str(index) for index in range(len(question["criteria"]))]
-    if not isinstance(value, dict) or set(value) != set(options):
-        raise HomeAssistantError(
-            f"OpenRouter returned invalid probabilities for question {question_id}"
-        )
-    probabilities = _normalize(question_id, [value[option] for option in options])
-    if question["type"] == "choice":
+def _parse_answer(answer: dict[str, Any]) -> ai_task.EvaluationAnswer:
+    """Convert a Decisions answer to the AI Task result format."""
+    if answer["type"] == "noul":
+        return ai_task.NoulAnswer(noul=answer["noul"])
+    if answer["type"] == "choice":
         return ai_task.ChoiceAnswer(
-            choice=options[probabilities.index(max(probabilities))],
-            probabilities=dict(zip(options, probabilities, strict=True)),
+            choice=answer["choice"], probabilities=answer["probabilities"]
         )
-    return ai_task.ScoreAnswer(
-        score=sum(index * value for index, value in enumerate(probabilities)),
-        probabilities=probabilities,
-    )
+    if answer["type"] == "score":
+        probabilities = answer["probabilities"]
+        if set(probabilities) != {str(i) for i in range(len(probabilities))}:
+            raise ValueError("Invalid score probability indices")
+        return ai_task.ScoreAnswer(
+            score=answer["score"],
+            probabilities=[probabilities[str(i)] for i in range(len(probabilities))],
+        )
+    raise ValueError("Unknown answer type")
 
 
 class OpenRouterEvaluationEntity(ai_task.AITaskEntity, OpenRouterEntity):
     """OpenRouter decision task entity."""
 
     _attr_name = None
-    _attr_supported_features = (
-        ai_task.AITaskEntityFeature.EVALUATE
-        | ai_task.AITaskEntityFeature.SUPPORT_ATTACHMENTS
-    )
+
+    def __init__(self, entry: OpenRouterConfigEntry, subentry: ConfigSubentry) -> None:
+        """Initialize the entity."""
+        super().__init__(entry, subentry)
+        self._attr_supported_features = ai_task.AITaskEntityFeature.EVALUATE
+        if {"image", "file"}.intersection(subentry.data.get(CONF_INPUT_MODALITIES, [])):
+            self._attr_supported_features |= (
+                ai_task.AITaskEntityFeature.SUPPORT_ATTACHMENTS
+            )
 
     @override
     async def _async_evaluate(
         self, task: ai_task.EvaluationTask
     ) -> ai_task.EvaluationTaskResult:
-        """Evaluate questions using structured output."""
-        prompt = "\n\n".join(
-            _format_question(question_id, question)
-            for question_id, question in task.questions.items()
-        )
-        if task.state is not None:
-            state = (
-                task.state if isinstance(task.state, str) else json_dumps(task.state)
-            )
-            prompt += f"\n\nState:\n{state}"
-
-        content: list[ChatCompletionContentPartParam] = [
-            {"type": "text", "text": prompt}
-        ]
+        """Evaluate questions using the Decisions API."""
+        body: dict[str, Any] = {
+            "model": self.model,
+            "questions": task.questions,
+            "state": task.state,
+        }
         if task.attachments:
-            content.extend(
-                await async_prepare_files_for_prompt(
-                    self.hass, [(a.path, a.mime_type) for a in task.attachments]
-                )
+            content = await async_prepare_files_for_prompt(
+                self.hass, [(a.path, a.mime_type) for a in task.attachments]
             )
+            modalities = self.subentry.data.get(CONF_INPUT_MODALITIES, [])
+            if any(
+                ("file" if part["type"] == "file" else "image") not in modalities
+                for part in content
+            ):
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="unsupported_attachment_type",
+                )
+            body["state"] = [
+                *([] if task.state is None else [task.state]),
+                *content,
+            ]
 
         try:
-            response = await self.entry.runtime_data.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": EVALUATION_PROMPT},
-                    {"role": "user", "content": content},
-                ],
-                response_format=ResponseFormatJSONSchema(
-                    type="json_schema",
-                    json_schema={
-                        "name": slugify(task.name)[:64] or "evaluation",
-                        "strict": True,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                question_id: _question_schema(question)
-                                for question_id, question in task.questions.items()
-                            },
-                            "required": list(task.questions),
-                            "additionalProperties": False,
-                        },
-                    },
-                ),
-                extra_headers={
-                    "X-Title": "Home Assistant",
-                    "HTTP-Referer": (
-                        "https://www.home-assistant.io/integrations/open_router"
-                    ),
+            response = await self.entry.runtime_data.post(
+                "https://openrouter.ai/api/alpha/decisions",
+                cast_to=dict[str, Any],
+                body=body,
+                options={
+                    "headers": {
+                        "X-Title": "Home Assistant",
+                        "HTTP-Referer": "https://www.home-assistant.io/integrations/open_router",
+                    }
                 },
-                extra_body={"provider": {"require_parameters": True}},
             )
         except openai.OpenAIError as err:
             raise HomeAssistantError(
-                f"Error evaluating OpenRouter task: {err}"
+                translation_domain=DOMAIN,
+                translation_key="api_error",
+                translation_placeholders={"error": str(err)},
             ) from err
 
-        if not response.choices or not response.choices[0].message.content:
-            raise HomeAssistantError("OpenRouter returned an empty evaluation")
         try:
-            data = json_loads(response.choices[0].message.content)
-        except JSONDecodeError as err:
-            raise HomeAssistantError(
-                "Error with OpenRouter structured response"
-            ) from err
-        if not isinstance(data, dict) or set(data) != set(task.questions):
-            raise HomeAssistantError("OpenRouter returned unexpected questions")
-
-        return ai_task.EvaluationTaskResult(
-            answers={
-                question_id: _parse_answer(question_id, question, data[question_id])
-                for question_id, question in task.questions.items()
+            answers = {
+                question_id: _parse_answer(answer)
+                for question_id, answer in response["answers"].items()
             }
-        )
+        except (KeyError, TypeError, ValueError, AttributeError) as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="invalid_evaluation",
+            ) from err
+
+        return ai_task.EvaluationTaskResult(answers=answers)

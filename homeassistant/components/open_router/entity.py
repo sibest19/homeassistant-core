@@ -245,6 +245,11 @@ async def async_prepare_files_for_prompt(
             if mime_type is None:
                 mime_type = guess_file_type(file_path)[0]
 
+            if mime_type:
+                mime_type = mime_type.partition(";")[0].strip().lower()
+                if mime_type == "image/jpg":
+                    mime_type = "image/jpeg"
+
             if not mime_type or not (
                 mime_type.startswith("image/") or mime_type == "application/pdf"
             ):
@@ -254,7 +259,16 @@ async def async_prepare_files_for_prompt(
                     translation_placeholders={"file_path": str(file_path)},
                 )
 
-            base64_file = base64.b64encode(file_path.read_bytes()).decode("utf-8")
+            try:
+                file_data = file_path.read_bytes()
+            except OSError as err:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="file_read_error",
+                    translation_placeholders={"file_path": str(file_path)},
+                ) from err
+
+            base64_file = base64.b64encode(file_data).decode("utf-8")
             if mime_type == "application/pdf":
                 content.append(
                     {

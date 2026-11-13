@@ -13,6 +13,7 @@ from homeassistant.config_entries import ConfigSubentry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.json import json_dumps
 from homeassistant.util.json import json_loads
 
 from . import OpenRouterConfigEntry
@@ -180,7 +181,11 @@ class OpenRouterEvaluationEntity(ai_task.AITaskEntity, OpenRouterEntity):
         body: dict[str, Any] = {
             "model": self.model,
             "questions": task.questions,
-            "state": task.state,
+            "state": (
+                json_dumps(task.state)
+                if isinstance(task.state, (bool, int, float))
+                else task.state
+            ),
         }
         if task.attachments:
             content = await async_prepare_files_for_prompt(

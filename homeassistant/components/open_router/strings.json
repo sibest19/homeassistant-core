@@ -110,6 +110,9 @@
     "file_not_found": {
       "message": "`{file_path}` does not exist"
     },
+    "file_read_error": {
+      "message": "Unable to read attachment `{file_path}`"
+    },
     "invalid_api_key": {
       "message": "Invalid API key"
     },

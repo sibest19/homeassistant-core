@@ -1,5 +1,6 @@
 """Test AI Task evaluation for OpenRouter."""
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -79,7 +80,17 @@ async def test_evaluate(
 
 
 @pytest.mark.parametrize(
-    "state", ["Delivered", {"count": 1}, ["Delivered", True], 0, False]
+    ("state", "expected_state"),
+    [
+        ("Delivered", "Delivered"),
+        ({"count": 1}, {"count": 1}),
+        (["Delivered", True], ["Delivered", True]),
+        (0, "0"),
+        (False, "false"),
+        (True, "true"),
+        (1.5, "1.5"),
+        (-2, "-2"),
+    ],
 )
 @respx.mock
 async def test_decisions_endpoint(
@@ -87,6 +98,7 @@ async def test_decisions_endpoint(
     mock_config_entry: MockConfigEntry,
     mock_openai_client: AsyncMock,
     state: Any,
+    expected_state: Any,
 ) -> None:
     """The existing OpenAI client sends authenticated requests to the alpha endpoint."""
     await setup_integration(hass, mock_config_entry)
@@ -107,6 +119,8 @@ async def test_decisions_endpoint(
     assert result.answers["delivered"] == ai_task.NoulAnswer(noul=0.9)
     assert route.calls[0].request.headers["Authorization"] == "Bearer test-key"
     assert route.calls[0].request.headers["X-Title"] == "Home Assistant"
+
+    assert json.loads(route.calls[0].request.content)["state"] == expected_state
 
 
 @pytest.mark.parametrize(

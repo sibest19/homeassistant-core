@@ -287,8 +287,8 @@ async def test_evaluate_api_error(
     await setup_integration(hass, mock_config_entry)
     mock_openai_client.post.side_effect = openai.OpenAIError("boom")
     with pytest.raises(
-        HomeAssistantError, match="Error communicating with the OpenRouter API: boom"
-    ):
+        HomeAssistantError, match="Error evaluating the OpenRouter task"
+    ) as exc_info:
         await ai_task.async_evaluate(
             hass,
             task_name="Delivery",
@@ -296,3 +296,6 @@ async def test_evaluate_api_error(
             questions=QUESTIONS,
             state="Delivered",
         )
+    assert exc_info.value.translation_key == "evaluation_error"
+    assert exc_info.value.translation_placeholders is None
+    assert exc_info.value.__cause__ is mock_openai_client.post.side_effect

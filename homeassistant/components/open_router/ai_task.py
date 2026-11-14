@@ -220,8 +220,7 @@ class OpenRouterEvaluationEntity(ai_task.AITaskEntity, OpenRouterEntity):
         except openai.OpenAIError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
-                translation_key="api_error",
-                translation_placeholders={"error": str(err)},
+                translation_key="evaluation_error",
             ) from err
 
         try:

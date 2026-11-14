@@ -104,6 +104,9 @@
     "empty_response": {
       "message": "OpenRouter returned an empty response"
     },
+    "evaluation_error": {
+      "message": "Error evaluating the OpenRouter task"
+    },
     "fetch_models_failed": {
       "message": "Failed to fetch the models from OpenRouter"
     },

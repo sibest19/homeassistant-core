@@ -18,11 +18,17 @@
     "generate_image_not_supported": {
       "message": "AI Task entity {entity_id} does not support generating images."
     },
+    "invalid_evaluation_answer": {
+      "message": "Evaluation returned an invalid answer for question {question_id}"
+    },
     "local_attachments_only": {
       "message": "Only local attachments are currently supported."
     },
     "no_entity": {
       "message": "No entity_id provided and no preferred entity set."
+    },
+    "unexpected_evaluation_questions": {
+      "message": "Evaluation returned unexpected questions"
     }
   },
   "services": {

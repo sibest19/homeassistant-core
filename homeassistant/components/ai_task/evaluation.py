@@ -10,6 +10,8 @@ from homeassistant.components.conversation import Attachment
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util.json import JsonValueType
 
+from .const import DOMAIN
+
 
 class NoulQuestion(TypedDict):
     """A question estimating the probability of yes."""
@@ -137,7 +139,10 @@ def validate_result(
         or not isinstance(result.answers, dict)
         or result.answers.keys() != questions.keys()
     ):
-        raise HomeAssistantError("Evaluation returned unexpected questions")
+        raise HomeAssistantError(
+            translation_domain=DOMAIN,
+            translation_key="unexpected_evaluation_questions",
+        )
 
     for question_id, question in questions.items():
         answer = result.answers[question_id]
@@ -181,5 +186,7 @@ def validate_result(
             )
         if not valid:
             raise HomeAssistantError(
-                f"Evaluation returned an invalid answer for question {question_id}"
+                translation_domain=DOMAIN,
+                translation_key="invalid_evaluation_answer",
+                translation_placeholders={"question_id": question_id},
             )
